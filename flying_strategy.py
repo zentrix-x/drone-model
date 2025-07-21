@@ -53,14 +53,6 @@ def mpc_control(prev_pos: np.ndarray, target: np.ndarray, pid_x, pid_y, pid_z, d
     
     return np.array([thrust_x, thrust_y, thrust_z, total_thrust]), energy_penalty, total_thrust
 
-# ---------- Dynamic Start and Goal Generation -------------------
-def random_position_within_range():
-    """Generate a random position within the world range."""
-    x = random.uniform(-WORLD_RANGE, WORLD_RANGE)
-    y = random.uniform(-WORLD_RANGE, WORLD_RANGE)
-    z = random.uniform(1, 5)  # Ensuring the z-value is above the ground
-    return (x, y, z)
-
 
 # ---------- Public API ---------------------------------------------------
 def flying_strategy(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
@@ -85,10 +77,6 @@ def dynamic_waypoints(prev_pos: np.ndarray, target: np.ndarray, safe_z: float) -
 
 # ---------- Implementation ----------------------------------------------
 def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
-    # Generate dynamic start and goal positions
-    task.start = random_position_within_range()
-    task.goal = random_position_within_range()
-    
     # Replace PID controller with energy-efficient MPC-based control
     pid_x = PIDController(Kp=2.5, Ki=0.1, Kd=0.7)  
     pid_y = PIDController(Kp=2.5, Ki=0.1, Kd=0.7)
