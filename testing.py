@@ -8,7 +8,7 @@ class TestFlyingStrategy(unittest.TestCase):
     def test_waypoint_navigation(self):
         mock_task = MagicMock(spec=MapTask)
         mock_task.start = (0, 0, 0)
-        mock_task.goal = (10, 10, 10)
+        mock_task.goal = (50000, 50000, 50000)
         mock_task.horizon = 30
         mock_task.sim_dt = 0.02
         mock_task.map_seed = None
