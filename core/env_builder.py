@@ -7,7 +7,7 @@ import pybullet as p
 from swarm.constants import WORLD_RANGE, HEIGHT_SCALE, N_OBSTACLES
 
 SAFE_ZONE_RADIUS = 2.0
-MAX_ATTEMPTS_PER_OBS = 10
+MAX_ATTEMPTS_PER_OBS = 100
 
 def _add_box(cli: int, pos, size, yaw) -> None:
     col = p.createCollisionShape(

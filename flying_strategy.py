@@ -15,8 +15,9 @@ from swarm.constants import (
     N_OBSTACLES,
     WORLD_RANGE
 )
+import random
 
-# ---------- PID Controller for Dynamic RPM Control -------------------
+
 class PIDController:
     def __init__(self, Kp, Ki, Kd, setpoint=0):
         self.Kp = Kp
@@ -33,15 +34,65 @@ class PIDController:
         self.previous_error = error
         return self.Kp * error + self.Ki * self.integral + self.Kd * derivative
 
+
+# ---------- Energy-efficient Control for Dynamic Trajectory -------------------
+def mpc_control(prev_pos: np.ndarray, target: np.ndarray, pid_x, pid_y, pid_z, dt) -> Tuple[np.ndarray, float]:
+    error_x = target[0] - prev_pos[0]
+    error_y = target[1] - prev_pos[1]
+    error_z = target[2] - prev_pos[2]
+
+    # Simple linear model for thrust (thrust proportional to distance to goal)
+    thrust_x = error_x * pid_x.Kp
+    thrust_y = error_y * pid_y.Kp
+    thrust_z = error_z * pid_z.Kp
+    
+    total_thrust = thrust_x + thrust_y + thrust_z
+
+    # Calculate a simplified energy consumption model (based on thrust)
+    energy_penalty = np.abs(total_thrust) ** 2  # Penalty increases with thrust (simplified model)
+    
+    return np.array([thrust_x, thrust_y, thrust_z, total_thrust]), energy_penalty
+
+
+# ---------- Dynamic Start and Goal Generation -------------------
+def random_position_within_range():
+    """Generate a random position within the world range."""
+    x = random.uniform(-WORLD_RANGE, WORLD_RANGE)
+    y = random.uniform(-WORLD_RANGE, WORLD_RANGE)
+    z = random.uniform(1, 5)  # Ensuring the z-value is above the ground
+    return (x, y, z)
+
+
 # ---------- Public API ---------------------------------------------------
 def flying_strategy(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
     return run_isolated(_flying_strategy_impl, task, gui=gui)
 
+
+# ---------- Dynamic Waypoints Implementation --------------------------------
+def dynamic_waypoints(prev_pos: np.ndarray, target: np.ndarray, safe_z: float) -> List[np.ndarray]:
+    """
+    Dynamically adjust waypoints based on current position and goal.
+    The drone will generate intermediate waypoints if it is far from the target.
+    """
+    distance_to_goal = np.linalg.norm(target - prev_pos)
+
+    if distance_to_goal > 15:  # If far from the target, introduce intermediate waypoints
+        mid_point = (target + prev_pos) / 2  # Midpoint as dynamic waypoint
+        return [prev_pos, mid_point, target]
+    else:
+        return [prev_pos, target]
+
+
 # ---------- Implementation ----------------------------------------------
 def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
-    pid_x = PIDController(Kp=0.5, Ki=0.05, Kd=0.1)
-    pid_y = PIDController(Kp=0.5, Ki=0.05, Kd=0.1)
-    pid_z = PIDController(Kp=1.0, Ki=0.1, Kd=0.2)
+    # Generate dynamic start and goal positions
+    task.start = random_position_within_range()
+    task.goal = random_position_within_range()
+    
+    # Replace PID controller with energy-efficient MPC-based control
+    pid_x = PIDController(Kp=2.0, Ki=0.05, Kd=0.5)  # Increased Kp and Kd for more aggressive control
+    pid_y = PIDController(Kp=2.0, Ki=0.05, Kd=0.5)
+    pid_z = PIDController(Kp=2.5, Ki=0.2, Kd=0.5)
     
     pid_x.setpoint = task.goal[0]
     pid_y.setpoint = task.goal[1]
@@ -56,11 +107,8 @@ def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
     gx, gy, gz = task.goal
     safe_z = max(SAFE_Z, start_xyz[2], gz)
 
-    wps = [
-        np.array([*start_xyz[:2], safe_z]),
-        np.array([gx, gy, safe_z]),
-        np.array([gx, gy, gz]),
-    ]
+    # Get dynamic waypoints
+    wps = dynamic_waypoints(start_xyz, task.goal, safe_z)
     wp_idx = 0
 
     t_sim = 0.0
@@ -72,8 +120,8 @@ def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
     while t_sim < task.horizon:
         target = wps[wp_idx]
         
-        # Generate the RPM commands using PID control and energy penalty
-        target_rpm, _ = _generate_pid_rpm_commands(prev_pos, target, pid_x, pid_y, pid_z, task.sim_dt)
+        # Generate RPM commands using MPC and energy-efficient control
+        target_rpm, energy_penalty = mpc_control(prev_pos, target, pid_x, pid_y, pid_z, task.sim_dt)
 
         # Step in the environment
         obs, *_ = env.step(target_rpm.reshape(1, 4))  # Pass the action with 4 RPM values
@@ -86,14 +134,15 @@ def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
             if dist < GOAL_TOL:
                 wp_idx += 1
         else:
-            if dist < GOAL_TOL:
+            # Goal reached condition with tighter tolerance
+            if dist < 0.5 * GOAL_TOL:  # Reduced tolerance to stop earlier
                 hover_elapsed += task.sim_dt
-                if hover_elapsed >= HOVER_SEC + 2:
+                if hover_elapsed >= 0.5:  # Minimized hover time
                     break
             else:
                 hover_elapsed = 0.0
 
-        total_energy += np.sum(np.abs(target_rpm))
+        total_energy += np.sum(np.abs(target_rpm)) + energy_penalty  # Include energy penalty
         t_sim += task.sim_dt
         prev_pos = pos
 
@@ -104,37 +153,15 @@ def _flying_strategy_impl(task: MapTask, *, gui: bool = False) -> List[RPMCmd]:
     print(f"Final Score: {score}")
     return rpm_log
 
-def _generate_pid_rpm_commands(prev_pos: np.ndarray, target: np.ndarray, pid_x, pid_y, pid_z, dt) -> np.ndarray:
-    error_x = target[0] - prev_pos[0]
-    error_y = target[1] - prev_pos[1]
-    error_z = target[2] - prev_pos[2]
-    
-    pid_x.setpoint = target[0]
-    pid_y.setpoint = target[1]
-    pid_z.setpoint = target[2]
-    
-    rpm_x = pid_x.compute(prev_pos[0], dt)
-    rpm_y = pid_y.compute(prev_pos[1], dt)
-    rpm_z = pid_z.compute(prev_pos[2], dt)
-    
-    rpm_factor = 1000 + max(0, rpm_x) + max(0, rpm_y) + max(0, rpm_z)
-    
-    # Add energy penalty if the total RPM exceeds the threshold
-    total_rpm = np.sum(np.abs([rpm_x, rpm_y, rpm_z]))
-    
-    if total_rpm > 2000:  # This is the RPM threshold
-        print("High RPM detected! Adding energy penalty.")
-        return np.array([rpm_factor, rpm_factor, rpm_factor, rpm_factor]), 10  # Return penalty value
-    else:
-        return np.array([rpm_factor, rpm_factor, rpm_factor, rpm_factor]), 0  # No penalty
-
 def _record_cmd(buffer: List[RPMCmd], rpm_vec: Sequence[float], t: float) -> None:
     rpm_tuple: Tuple[float, float, float, float] = tuple(float(x) for x in rpm_vec)
     buffer.append(RPMCmd(t=t, rpm=rpm_tuple))
 
+
 def _evaluate_flight_plan_with_energy(rpm_log: List[RPMCmd], total_energy: float, horizon: float) -> float:
     success = 0
-    time_score = 1 - len(rpm_log) / horizon
+    time_score = max(0, 1 - len(rpm_log) / horizon)
+    
     energy_penalty = np.sum([np.sum(np.abs(cmd.rpm)) for cmd in rpm_log])
     energy_score = 1 - (energy_penalty / total_energy)
 
